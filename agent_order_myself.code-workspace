@@ -1,0 +1,14 @@
+{
+  "folders": [
+    { "name": "拾单 AI Agent", "path": "." }
+  ],
+  "settings": {
+    "files.encoding": "utf8",
+    "editor.formatOnSave": true,
+    "python.defaultInterpreterPath": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+    "terminal.integrated.cwd": "${workspaceFolder}"
+  },
+  "extensions": {
+    "recommendations": ["ms-python.python"]
+  }
+}

@@ -1,0 +1,21 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest-tmp*/
+*.tsbuildinfo
+tmp/
+backend/data/
+frontend/node_modules/
+frontend/dist/
+frontend/.npm-cache/
+frontend/coverage/
+.idea/
+.vscode/
+
+# Local AI collaboration and execution notes
+AGENTS.md
+task_plan.md
+findings.md
+progress.md

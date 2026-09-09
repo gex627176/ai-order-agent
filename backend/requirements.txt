@@ -1,0 +1,11 @@
+fastapi>=0.115,<1
+httpx>=0.28,<1
+uvicorn[standard]>=0.34,<1
+langgraph>=1.0,<2
+langgraph-checkpoint-sqlite>=3,<4
+elasticsearch>=8.17,<10
+openpyxl>=3.1,<4
+PyMuPDF>=1.26,<2
+Pillow>=11,<13
+pytesseract>=0.3.13,<1
+python-multipart>=0.0.20,<1
