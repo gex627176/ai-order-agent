@@ -132,7 +132,7 @@ class AgentLoop:
     ) -> dict[str, Any]:
         with self._session_lock(session_id):
             payload = {"content": content.strip()}
-            request_digest, replay, _was_in_progress = self.store.begin_request(
+            request_digest, replay, was_in_progress = self.store.begin_request(
                 session_id,
                 idempotency_key,
                 "message",
@@ -140,6 +140,10 @@ class AgentLoop:
             )
             session = self._reconcile_completed_order(session_id)
             if replay is not None:
+                if was_in_progress:
+                    self.store.complete_request(
+                        session_id, request_digest, "message", payload, replay
+                    )
                 if session["status"] == SessionStatus.COMPLETED.value:
                     self.store.complete_request(
                         session_id, request_digest, "message", payload, session
@@ -149,6 +153,42 @@ class AgentLoop:
             if session["status"] == SessionStatus.COMPLETED.value:
                 raise AgentStateConflict("已完成会话不能继续发送消息")
             message = content.strip()
+            request_events = (
+                self.store.events_for_request(session_id, request_digest)
+                if was_in_progress and request_digest else []
+            )
+            if any(event["type"] == "assistant" for event in request_events):
+                response = self.store.get(session_id)
+                self.store.stage_request_response(
+                    session_id, request_digest, "message", payload, response
+                )
+                self.store.complete_request(
+                    session_id, request_digest, "message", payload, response
+                )
+                return response
+            existing_user_event = next(
+                (event for event in request_events if event["type"] == "user"),
+                None,
+            )
+            if existing_user_event is not None:
+                response = self.store.update(
+                    session_id,
+                    expected_version=session["version"],
+                    last_message=(
+                        "上次处理在完成回复前中断，本轮不会重复执行工具；"
+                        "请重新发送这条消息。"
+                    ),
+                )
+                response = self._ensure_assistant_event(
+                    session_id, response, request_digest
+                )
+                self.store.stage_request_response(
+                    session_id, request_digest, "message", payload, response
+                )
+                self.store.complete_request(
+                    session_id, request_digest, "message", payload, response
+                )
+                return response
             requested_customer = _requested_customer(message)
             if session.get("current_draft_id") and requested_customer:
                 matches = [
@@ -170,15 +210,44 @@ class AgentLoop:
                 "completed",
                 message,
                 {"content": message},
+                request_key_digest=request_digest,
             )
             session = self.context.compact(self.store, self.store.get(session_id))
             response = self._run_message(
                 session, message, request_digest, _ExecutionBudget(self.max_tool_calls)
             )
+            response = self._ensure_assistant_event(
+                session_id, response, request_digest
+            )
+            self.store.stage_request_response(
+                session_id, request_digest, "message", payload, response
+            )
             self.store.complete_request(
                 session_id, request_digest, "message", payload, response
             )
             return response
+
+    def _ensure_assistant_event(
+        self,
+        session_id: str,
+        response: dict[str, Any],
+        request_key_digest: str | None,
+    ) -> dict[str, Any]:
+        """Persist state-transition replies so the chat transcript stays complete."""
+        text = str(response.get("last_message", "")).strip()
+        if not text:
+            return response
+        self.store.append_event(
+            session_id,
+            "assistant",
+            "main_agent",
+            "message_sent",
+            "completed",
+            text,
+            {"content": text},
+            request_key_digest=request_key_digest,
+        )
+        return self.store.get(session_id)
 
     def resume(
         self,
@@ -193,6 +262,10 @@ class AgentLoop:
             )
             session = self._reconcile_completed_order(session_id)
             if replay is not None:
+                if was_in_progress:
+                    self.store.complete_request(
+                        session_id, request_digest, "resume", payload, replay
+                    )
                 if session["status"] == SessionStatus.COMPLETED.value:
                     self.store.complete_request(
                         session_id, request_digest, "resume", payload, session
@@ -228,6 +301,9 @@ class AgentLoop:
                     status=SessionStatus.ACTIVE.value,
                     pending_action=None,
                     last_message="已拒绝建单，草稿仍保留为待审核状态。",
+                )
+                self.store.stage_request_response(
+                    session_id, request_digest, "resume", payload, response
                 )
                 self.store.complete_request(
                     session_id, request_digest, "resume", payload, response
@@ -303,6 +379,9 @@ class AgentLoop:
                 current_order_id=order["id"],
                 pending_action=None,
                 last_message=f"订单 {order['order_no']} 已创建。",
+            )
+            self.store.stage_request_response(
+                session_id, request_digest, "resume", payload, response
             )
             self.store.complete_request(
                 session_id, request_digest, "resume", payload, response
@@ -797,15 +876,6 @@ class AgentLoop:
             f"订单 {order['order_no']} 已创建。"
             if order is not None
             else (message.strip() or "请求已处理；当前没有已创建订单。")
-        )
-        self.store.append_event(
-            session["id"],
-            "assistant",
-            "main_agent",
-            "message_sent",
-            "completed",
-            text,
-            {"content": text},
         )
         return self.store.update(
             session["id"],

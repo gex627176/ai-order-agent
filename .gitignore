@@ -6,6 +6,7 @@ __pycache__/
 .pytest-tmp*/
 *.tsbuildinfo
 tmp/
+.tmp/
 backend/data/
 frontend/node_modules/
 frontend/dist/

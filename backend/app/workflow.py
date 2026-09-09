@@ -185,6 +185,7 @@ class OrderWorkflow:
                     self.settings.deepseek_base_url,
                     self.settings.deepseek_model,
                     self.settings.deepseek_prompt_version,
+                    self.settings.deepseek_timeout_seconds,
                 )
                 model_started = time.perf_counter()
                 try:

@@ -54,3 +54,32 @@ describe("识别任务 SSE API", () => {
     expect(onError).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("Agent Harness API", () => {
+  it("按独立消息和审批入口发送幂等请求", async () => {
+    const payload = { id: "session/a", status: "active", events: [] };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => payload,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.createAgentSession(null);
+    await api.agentSession("session/a");
+    await api.sendAgentMessage("session/a", "番茄2斤", "message-key");
+    await api.resumeAgentSession("session/a", true, "resume-key");
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/agent/sessions", expect.objectContaining({
+      method: "POST", body: JSON.stringify({ site_id: 1, customer_id: null }),
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/agent/sessions/session%2Fa", expect.any(Object));
+    expect(fetchMock).toHaveBeenNthCalledWith(3, "/api/agent/sessions/session%2Fa/messages", expect.objectContaining({
+      method: "POST", headers: expect.objectContaining({ "Idempotency-Key": "message-key" }),
+      body: JSON.stringify({ content: "番茄2斤" }),
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(4, "/api/agent/sessions/session%2Fa/resume", expect.objectContaining({
+      method: "POST", headers: expect.objectContaining({ "Idempotency-Key": "resume-key" }),
+      body: JSON.stringify({ approved: true }),
+    }));
+  });
+});

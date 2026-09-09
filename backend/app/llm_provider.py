@@ -64,12 +64,14 @@ class DeepSeekExtractor:
     def __init__(
         self, api_key: str, base_url: str, model: str,
         prompt_version: str = PROMPT_VERSION,
+        timeout_seconds: float = 15.0,
     ):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.prompt = get_prompt_spec(prompt_version)
         self.prompt_version = self.prompt.version
+        self.timeout_seconds = timeout_seconds
         self.last_usage = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
@@ -79,7 +81,7 @@ class DeepSeekExtractor:
     def extract(self, text: str) -> list[dict]:
         if not self.api_key:
             raise RuntimeError("未配置 DEEPSEEK_API_KEY")
-        with httpx.Client(timeout=30) as client:
+        with httpx.Client(timeout=self.timeout_seconds) as client:
             response = client.post(
                 f"{self.base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {self.api_key}"},
@@ -93,6 +95,7 @@ class DeepSeekExtractor:
                         },
                     ],
                     "response_format": {"type": "json_object"},
+                    "thinking": {"type": "disabled"},
                     "temperature": 0,
                     "max_tokens": 1200,
                 },

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 
@@ -13,6 +14,7 @@ class Settings:
     deepseek_base_url: str
     deepseek_model: str
     deepseek_prompt_version: str
+    deepseek_timeout_seconds: float
     elasticsearch_url: str
     sku_index_name: str
     deepseek_input_cost_per_million: float
@@ -42,6 +44,9 @@ class Settings:
             deepseek_prompt_version=os.getenv(
                 "DEEPSEEK_PROMPT_VERSION", "order-extraction-v1"
             ).strip(),
+            deepseek_timeout_seconds=_positive_float_env(
+                "DEEPSEEK_TIMEOUT_SECONDS", 15.0
+            ),
             elasticsearch_url=os.getenv("ELASTICSEARCH_URL", "").strip().rstrip("/"),
             sku_index_name=os.getenv("SKU_INDEX_NAME", "ai-order-skus").strip(),
             deepseek_input_cost_per_million=_float_env(
@@ -79,6 +84,19 @@ def _float_env(name: str, default: float) -> float:
         raise ValueError(f"{name} 必须是数字") from exc
     if value < 0:
         raise ValueError(f"{name} 不能小于 0")
+    return value
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} 必须是数字") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} 必须是有限且大于 0 的数字")
     return value
 
 

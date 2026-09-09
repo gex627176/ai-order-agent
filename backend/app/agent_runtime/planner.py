@@ -31,7 +31,9 @@ class DeepSeekToolPlanner:
             raise PlannerError("Harness 模型编排未启用")
         started = time.perf_counter()
         try:
-            with httpx.Client(timeout=30) as client:
+            with httpx.Client(
+                timeout=self._settings.deepseek_timeout_seconds
+            ) as client:
                 response = client.post(
                     f"{self._settings.deepseek_base_url}/chat/completions",
                     headers={

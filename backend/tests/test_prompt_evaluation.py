@@ -1,4 +1,5 @@
 from app.llm_provider import PROMPTS, DeepSeekExtractor, get_prompt_spec
+from app.settings import Settings
 from evaluation.compare_evaluations import compare_reports
 
 
@@ -25,6 +26,60 @@ def test_prompt_registry_is_explicit_and_rejects_unknown_version():
         assert "不支持的 Prompt 版本" in str(exc)
     else:
         raise AssertionError("未知 Prompt 版本必须被拒绝")
+
+
+def test_extractor_disables_thinking_and_uses_configured_timeout(monkeypatch):
+    captured: dict = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [{"message": {"content": '{"items":[]}'}}],
+                "usage": {},
+            }
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def post(self, url, **kwargs):
+            captured["url"] = url
+            captured["request"] = kwargs
+            return FakeResponse()
+
+    monkeypatch.setattr("app.llm_provider.httpx.Client", FakeClient)
+    extractor = DeepSeekExtractor(
+        "test-key", "https://example.invalid", "test-model",
+        timeout_seconds=7.5,
+    )
+
+    assert extractor.extract("番茄5斤") == []
+    assert captured["client"]["timeout"] == 7.5
+    assert captured["request"]["json"]["thinking"] == {"type": "disabled"}
+
+
+def test_deepseek_timeout_setting_is_positive(monkeypatch, tmp_path):
+    monkeypatch.setenv("DEEPSEEK_TIMEOUT_SECONDS", "9.5")
+    settings = Settings.from_env(str(tmp_path / "settings.db"))
+    assert settings.deepseek_timeout_seconds == 9.5
+
+    for invalid_value in ("0", "nan", "inf", "-inf"):
+        monkeypatch.setenv("DEEPSEEK_TIMEOUT_SECONDS", invalid_value)
+        try:
+            Settings.from_env(str(tmp_path / f"invalid-{invalid_value}.db"))
+        except ValueError as exc:
+            assert "DEEPSEEK_TIMEOUT_SECONDS 必须是有限且大于 0 的数字" in str(exc)
+        else:
+            raise AssertionError("模型超时必须是有限正数")
 
 
 def test_comparison_passes_compatible_non_regression():

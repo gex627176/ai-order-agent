@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ApiRequestError, api } from "./api";
+import AgentWorkspace from "./AgentWorkspace";
 import CatalogPanel from "./CatalogPanel";
 import OrderDetailsDrawer from "./OrderDetailsDrawer";
 import type {
@@ -15,7 +16,21 @@ const FALLBACK_POLL_INTERVAL_MS = 3000;
 const FALLBACK_POLL_LIMIT = 40;
 const CUSTOM_UNIT_VALUE = "";
 type DraftSaveStatus = "idle" | "dirty" | "saving" | "saved" | "error";
+type WorkspaceMode = "classic" | "agent";
 const UNSAVED_DRAFT_STATES: DraftSaveStatus[] = ["dirty", "saving", "error"];
+
+function displayDuration(durationMs: number): { value: string; unit: string } {
+  if (durationMs >= 10_000) {
+    return { value: (durationMs / 1000).toFixed(1), unit: "s" };
+  }
+  return { value: durationMs.toLocaleString(), unit: "ms" };
+}
+
+function p95SampleContext(totalCalls: number): string {
+  if (totalCalls === 0) return "暂无历史样本";
+  if (totalCalls < 20) return `${totalCalls} 次样本 · 小样本 P95 等于最慢值`;
+  return `${totalCalls} 次历史样本`;
+}
 
 export default function App() {
   const recognizeLock = useRef(false);
@@ -49,6 +64,8 @@ export default function App() {
   const [selectedOrderDraft, setSelectedOrderDraft] = useState<Draft | null>(null);
   const [orderDetailLoading, setOrderDetailLoading] = useState(false);
   const [orderDetailError, setOrderDetailError] = useState("");
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("classic");
+  const p95Display = displayDuration(metrics?.p95_duration_ms ?? 0);
 
   const total = useMemo(
     () => draft?.items.reduce((sum, item) => sum + item.quantity * item.unit_price, 0) ?? 0,
@@ -661,6 +678,32 @@ export default function App() {
     }[draftSaveStatus];
   }
 
+  async function openAgentDraft(draftId: string) {
+    setError("");
+    setWorkspaceMode("classic");
+    try {
+      const currentDraft = await api.draft(draftId);
+      if (!mountedRef.current) return;
+      await openDraft(currentDraft);
+    } catch (reason) {
+      if (!mountedRef.current) return;
+      setError(reason instanceof Error ? reason.message : "草稿加载失败");
+    }
+  }
+
+  async function refreshAfterAgentOrder() {
+    try {
+      const [nextOrders, nextDrafts] = await Promise.all([api.orders(), api.drafts()]);
+      if (!mountedRef.current) return;
+      setOrders(nextOrders);
+      setDrafts(nextDrafts);
+    } catch (reason) {
+      if (!mountedRef.current) return;
+      setError(reason instanceof Error ? reason.message : "订单列表刷新失败");
+      setWorkspaceMode("classic");
+    }
+  }
+
   return <div className="shell">
     <header className="topbar">
       <div className="brand"><span className="brand-mark">拾</span><div><h1>拾单</h1><p>Local AI Order Agent</p></div></div>
@@ -673,6 +716,26 @@ export default function App() {
         <div className="hero-number"><strong>{orders.length}</strong><span>已确认订单</span></div>
       </section>
 
+      <nav className="mode-switch" aria-label="录单方式">
+        <button
+          type="button" className={workspaceMode === "classic" ? "active" : ""}
+          aria-pressed={workspaceMode === "classic"}
+          onClick={() => setWorkspaceMode("classic")}
+        ><span>标准录单</span><small>识别后直接人工审核</small></button>
+        <button
+          type="button" className={workspaceMode === "agent" ? "active" : ""}
+          aria-pressed={workspaceMode === "agent"}
+          onClick={() => setWorkspaceMode("agent")}
+        ><span>Agent 对话</span><small>多轮沟通与受控工具调用</small></button>
+      </nav>
+
+      <div className="mode-panel" hidden={workspaceMode !== "agent"}><AgentWorkspace
+          customers={customers}
+          onOpenDraft={(draftId) => { void openAgentDraft(draftId); }}
+          onOrderCreated={() => { void refreshAfterAgentOrder(); }}
+        /></div>
+      <div className="mode-panel" hidden={workspaceMode !== "classic"}>
+
       {(error || notice) && <div className={error ? "alert error" : "alert success"}>{error || notice}</div>}
 
       <section className="card metrics-panel">
@@ -682,7 +745,11 @@ export default function App() {
           <article><span>调用次数</span><strong>{metrics?.total_calls ?? 0}</strong></article>
           <article><span>成功率</span><strong>{(metrics?.success_rate ?? 0).toFixed(1)}%</strong></article>
           <article><span>降级率</span><strong>{(metrics?.fallback_rate ?? 0).toFixed(1)}%</strong></article>
-          <article><span>P95 时延</span><strong>{metrics?.p95_duration_ms ?? 0}<small> ms</small></strong></article>
+          <article className="latency-metric">
+            <span>P95 时延</span>
+            <strong>{p95Display.value}<small> {p95Display.unit}</small></strong>
+            <em>{p95SampleContext(metrics?.total_calls ?? 0)}</em>
+          </article>
           <article><span>累计 Token</span><strong>{(metrics?.total_tokens ?? 0).toLocaleString()}</strong></article>
           <article><span>估算费用</span><strong>{(metrics?.estimated_cost ?? 0).toFixed(6)}</strong></article>
         </div>
@@ -798,6 +865,7 @@ export default function App() {
         <section className="card history"><div className="section-title"><span>06</span><div><h3>最近订单</h3><p>数据保存在本地 SQLite 中</p></div></div>
           {orders.length === 0 ? <p className="muted">还没有已确认订单。</p> : <div className="order-list">{orders.slice(0, 5).map((order) => <button type="button" key={order.id} onClick={() => void openOrderDetails(order)}><div><strong>{order.customer_name}</strong><span>{order.order_no}</span></div><div><b>¥{order.total_amount.toFixed(2)}</b><span>{order.items.length} 项 · 查看详情</span></div></button>)}</div>}
         </section>
+      </div>
       </div>
     </main>
     <OrderDetailsDrawer

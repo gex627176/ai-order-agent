@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS agent_events (
     status TEXT NOT NULL,
     summary TEXT NOT NULL,
     payload_json TEXT NOT NULL DEFAULT '{}',
+    request_key_digest TEXT,
     created_at TEXT NOT NULL,
     FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE,
     UNIQUE(session_id, sequence)
@@ -86,6 +87,7 @@ class AgentSessionStore:
     def initialize(self) -> None:
         with self._database.connect() as connection:
             connection.executescript(SESSION_SCHEMA)
+            self._migrate_agent_events(connection)
             self._migrate_agent_requests(connection)
 
     def create(self, site_id: int, customer_id: int | None) -> dict[str, Any]:
@@ -205,6 +207,7 @@ class AgentSessionStore:
         status: str,
         summary: str,
         payload: dict[str, Any] | None = None,
+        request_key_digest: str | None = None,
     ) -> dict[str, Any]:
         with self._database.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -224,8 +227,8 @@ class AgentSessionStore:
                 """
                 INSERT INTO agent_events(
                     session_id, sequence, type, actor, name, status,
-                    summary, payload_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    summary, payload_json, request_key_digest, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id, sequence, event_type, actor, name, status,
@@ -235,6 +238,7 @@ class AgentSessionStore:
                         ensure_ascii=False,
                         separators=(",", ":"),
                     ),
+                    request_key_digest,
                     _now(),
                 ),
             )
@@ -242,6 +246,20 @@ class AgentSessionStore:
                 "SELECT * FROM agent_events WHERE id = ?", (cursor.lastrowid,)
             ).fetchone()
         return self._event_from_row(row)
+
+    def events_for_request(
+        self, session_id: str, request_key_digest: str
+    ) -> list[dict[str, Any]]:
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM agent_events
+                WHERE session_id = ? AND request_key_digest = ?
+                ORDER BY sequence
+                """,
+                (session_id, request_key_digest),
+            ).fetchall()
+        return [self._event_from_row(row) for row in rows]
 
     def events_between(
         self, session_id: str, first: int, last: int
@@ -292,12 +310,43 @@ class AgentSessionStore:
                 return key_digest, None, False
         if not _payload_matches(row["payload_digest"], payload, payload_digest):
             raise AgentIdempotencyConflict("幂等键已用于不同的请求载荷")
-        response = (
-            json.loads(row["response_json"])
-            if row["status"] == "completed" and row["response_json"]
-            else None
-        )
+        response = json.loads(row["response_json"]) if row["response_json"] else None
         return key_digest, response, row["status"] == "in_progress"
+
+    def stage_request_response(
+        self,
+        session_id: str,
+        request_key_digest: str | None,
+        operation: str,
+        payload: Any,
+        response: dict[str, Any],
+    ) -> None:
+        """Save a replayable result before the request is marked completed."""
+        if not request_key_digest:
+            return
+        payload_digest = _payload_digest(payload)
+        with self._database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT payload_digest FROM agent_requests
+                WHERE session_id = ? AND request_key_digest = ? AND operation = ?
+                """,
+                (session_id, request_key_digest, operation),
+            ).fetchone()
+            if row is None or not _payload_matches(
+                row["payload_digest"], payload, payload_digest
+            ):
+                raise AgentIdempotencyConflict("幂等请求占位不存在或载荷已变化")
+            connection.execute(
+                """
+                UPDATE agent_requests SET response_json = ?, updated_at = ?
+                WHERE session_id = ? AND request_key_digest = ? AND operation = ?
+                """,
+                (
+                    json.dumps(response, ensure_ascii=False, separators=(",", ":")),
+                    _now(), session_id, request_key_digest, operation,
+                ),
+            )
 
     def complete_request(
         self,
@@ -361,6 +410,23 @@ class AgentSessionStore:
             ).fetchall()
         if any(row["customer_id"] != customer_id for row in rows):
             raise AgentStateConflict("Harness 已绑定的草稿不能切换客户")
+
+    @staticmethod
+    def _migrate_agent_events(connection: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(agent_events)").fetchall()
+        }
+        if "request_key_digest" not in columns:
+            connection.execute(
+                "ALTER TABLE agent_events ADD COLUMN request_key_digest TEXT"
+            )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_events_request
+            ON agent_events(session_id, request_key_digest, sequence)
+            """
+        )
 
     @staticmethod
     def _migrate_agent_requests(connection: sqlite3.Connection) -> None:
@@ -442,6 +508,7 @@ class AgentSessionStore:
         result = dict(row)
         result["payload"] = json.loads(result.pop("payload_json"))
         result.pop("session_id", None)
+        result.pop("request_key_digest", None)
         return result
 
 

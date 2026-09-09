@@ -15,6 +15,7 @@ from app.agent_runtime.loop import _model_result
 from app.agent_runtime.session import AgentSessionStore
 from app.agent_runtime.skills import SkillLoader
 from app.main import create_app
+from app.tools.catalog_tools import _matches_query
 
 
 def create_session(client: TestClient, customer_id: int | None = None) -> dict:
@@ -42,6 +43,30 @@ def send_message(
     return response.json()
 
 
+def test_catalog_candidate_search_handles_descriptive_product_name():
+    assert _matches_query("大土豆", "土豆") is True
+    assert _matches_query("大土豆", "苹果") is False
+
+
+def test_harness_planner_uses_configured_timeout(monkeypatch, tmp_path):
+    captured: dict = {}
+    monkeypatch.setenv("AGENT_HARNESS_PROVIDER", "deepseek")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setenv("DEEPSEEK_TIMEOUT_SECONDS", "8.5")
+
+    def client_factory(**kwargs):
+        captured.update(kwargs)
+        return _FakeClient([_model_payload(content="请先告诉我客户名称。")])
+
+    monkeypatch.setattr("app.agent_runtime.planner.httpx.Client", client_factory)
+    app = create_app(str(tmp_path / "planner-timeout.db"))
+    with TestClient(app) as client:
+        session = create_session(client)
+        send_message(client, session["id"], "帮我录番茄5斤")
+
+    assert captured["timeout"] == 8.5
+
+
 def test_agent_session_supports_multiturn_order_and_explicit_resume(tmp_path):
     app = create_app(str(tmp_path / "test.db"))
     with TestClient(app) as client:
@@ -52,6 +77,14 @@ def test_agent_session_supports_multiturn_order_and_explicit_resume(tmp_path):
 
         assert waiting_customer["status"] == "waiting_input"
         assert waiting_customer["pending_action"]["name"] == "provide_customer"
+        assert [
+            event["type"] for event in waiting_customer["events"]
+            if event["type"] in {"user", "assistant"}
+        ] == ["user", "assistant"]
+        assert all(
+            "request_key_digest" not in event
+            for event in waiting_customer["events"]
+        )
         assert client.get("/api/orders").json() == []
 
         draft_ready = send_message(
@@ -60,6 +93,10 @@ def test_agent_session_supports_multiturn_order_and_explicit_resume(tmp_path):
         assert draft_ready["status"] == "waiting_approval"
         assert draft_ready["current_draft_id"]
         assert draft_ready["pending_action"]["name"] == "confirm_order"
+        assert [
+            event["type"] for event in draft_ready["events"]
+            if event["type"] in {"user", "assistant"}
+        ] == ["user", "assistant", "user", "assistant"]
         assert client.get("/api/orders").json() == []
 
         resumed = client.post(
@@ -805,6 +842,12 @@ def test_message_placeholder_survives_failure_and_retries_without_duplicate_draf
         )
         assert retry.status_code == 200
         assert len(client.get("/api/drafts").json()) == 1
+        dialogue = [
+            event for event in retry.json()["events"]
+            if event["type"] in {"user", "assistant"}
+        ]
+        assert [event["type"] for event in dialogue] == ["user", "assistant"]
+        assert dialogue[0]["payload"]["content"] == "番茄1斤"
     with sqlite3.connect(database_path) as connection:
         request_row = connection.execute(
             """
@@ -817,6 +860,33 @@ def test_message_placeholder_survives_failure_and_retries_without_duplicate_draf
     assert len(request_row[0]) == 64
     assert len(request_row[1]) == 64
     assert "crash-message-key" not in " ".join(request_row)
+
+
+def test_descriptive_sku_query_returns_candidate_without_automatic_match(tmp_path):
+    app = create_app(str(tmp_path / "test.db"))
+    with TestClient(app) as client:
+        session = create_session(client, customer_id=1)
+        result = send_message(client, session["id"], "大土豆10斤")
+        draft = client.get(f"/api/drafts/{result['current_draft_id']}").json()
+        denied = client.post(
+            f"/api/agent/sessions/{session['id']}/resume",
+            json={"approved": True},
+        )
+
+    candidate_results = [
+        event["payload"]["result"] for event in result["events"]
+        if event["type"] == "tool"
+        and event["name"] == "catalog_search"
+        and event["status"] == "completed"
+    ]
+    assert any(
+        candidate["name"] == "土豆"
+        for candidates in candidate_results
+        for candidate in candidates
+    )
+    assert result["pending_action"]["name"] == "review_sku"
+    assert draft["items"][0]["matched"] is False
+    assert denied.status_code == 409
 
 
 def test_resume_placeholder_reconciles_order_after_completion_write_failure(
@@ -854,6 +924,98 @@ def test_resume_placeholder_reconciles_order_after_completion_write_failure(
         assert retry.json()["status"] == "completed"
         assert retry.json()["current_draft_id"] == ready["current_draft_id"]
         assert len(client.get("/api/orders").json()) == 1
+
+
+def test_message_retry_after_response_stage_failure_does_not_duplicate_dialogue(
+    tmp_path
+):
+    app = create_app(str(tmp_path / "test.db"))
+    with TestClient(app, raise_server_exceptions=False) as client:
+        session = create_session(client)
+        store = client.app.state.agent_loop.store
+        original = store.stage_request_response
+        failed = False
+
+        def fail_once(*args, **kwargs):
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise RuntimeError("simulated stage failure")
+            return original(*args, **kwargs)
+
+        store.stage_request_response = fail_once
+        first = client.post(
+            f"/api/agent/sessions/{session['id']}/messages",
+            json={"content": "帮我录番茄1斤"},
+            headers={"Idempotency-Key": "stage-crash-key"},
+        )
+        assert first.status_code == 500
+        store.stage_request_response = original
+        retry = client.post(
+            f"/api/agent/sessions/{session['id']}/messages",
+            json={"content": "帮我录番茄1斤"},
+            headers={"Idempotency-Key": "stage-crash-key"},
+        )
+
+    assert retry.status_code == 200
+    dialogue = [
+        event for event in retry.json()["events"]
+        if event["type"] in {"user", "assistant"}
+    ]
+    assert [event["type"] for event in dialogue] == ["user", "assistant"]
+    assert dialogue[0]["payload"]["content"] == "帮我录番茄1斤"
+
+
+def test_message_retry_after_reply_boundary_failure_does_not_rerun_tools(
+    tmp_path
+):
+    app = create_app(str(tmp_path / "test.db"))
+    with TestClient(app, raise_server_exceptions=False) as client:
+        session = create_session(client, customer_id=1)
+        loop = client.app.state.agent_loop
+        original = loop._ensure_assistant_event
+        failed = False
+
+        def fail_once(*args, **kwargs):
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise RuntimeError("simulated reply boundary failure")
+            return original(*args, **kwargs)
+
+        loop._ensure_assistant_event = fail_once
+        first = client.post(
+            f"/api/agent/sessions/{session['id']}/messages",
+            json={"content": "番茄1斤"},
+            headers={"Idempotency-Key": "reply-crash-key"},
+        )
+        assert first.status_code == 500
+        before_retry = client.get(
+            f"/api/agent/sessions/{session['id']}?after_sequence=0&limit=200"
+        ).json()
+        loop._ensure_assistant_event = original
+        retry = client.post(
+            f"/api/agent/sessions/{session['id']}/messages",
+            json={"content": "番茄1斤"},
+            headers={"Idempotency-Key": "reply-crash-key"},
+        )
+
+    assert retry.status_code == 200
+    dialogue = [
+        event for event in retry.json()["events"]
+        if event["type"] in {"user", "assistant"}
+    ]
+    assert [event["type"] for event in dialogue] == ["user", "assistant"]
+    assert "不会重复执行工具" in dialogue[1]["payload"]["content"]
+    before_non_dialogue = [
+        event["id"] for event in before_retry["events"]
+        if event["type"] not in {"user", "assistant"}
+    ]
+    after_non_dialogue = [
+        event["id"] for event in retry.json()["events"]
+        if event["type"] not in {"user", "assistant"}
+    ]
+    assert after_non_dialogue == before_non_dialogue
 
 
 def test_old_confirm_endpoint_is_reconciled_into_agent_session(tmp_path):
@@ -1016,6 +1178,33 @@ def test_event_storage_and_model_projection_remove_internal_fields(tmp_path):
         "payload_md5": "payload-secret",
         "text": "full private body",
     }) == {"id": "task-1", "status": "succeeded"}
+
+
+def test_legacy_agent_event_table_adds_internal_request_digest_column(tmp_path):
+    database_path = str(tmp_path / "legacy-events.db")
+    with sqlite3.connect(database_path) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            """
+            CREATE TABLE agent_events (
+                id INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL
+            )
+            """
+        )
+        AgentSessionStore._migrate_agent_events(connection)
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(agent_events)")
+        }
+        indexes = {
+            row["name"]
+            for row in connection.execute("PRAGMA index_list(agent_events)")
+        }
+
+    assert "request_key_digest" in columns
+    assert "idx_agent_events_request" in indexes
 
 
 def test_legacy_agent_request_rows_migrate_to_hashed_keys(tmp_path):

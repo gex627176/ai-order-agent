@@ -1,5 +1,5 @@
 import type {
-  AliasCandidate, AliasReviewResult, BusinessMetrics, CatalogImportResult, CatalogPublishResult,
+  AgentSession, AliasCandidate, AliasReviewResult, BusinessMetrics, CatalogImportResult, CatalogPublishResult,
   Customer, Draft, LlmFailureRecord, MetricsOverview, ModelMetrics,
   Order, Product, RecognitionTask, WorkflowCheckpoint,
 } from "./types";
@@ -30,6 +30,32 @@ export type RecognitionTaskSubscription = {
 };
 
 export const api = {
+  createAgentSession: (customerId: number | null) => request<AgentSession>(
+    "/api/agent/sessions", {
+      method: "POST",
+      body: JSON.stringify({ site_id: 1, customer_id: customerId }),
+    },
+  ),
+  agentSession: (sessionId: string) => request<AgentSession>(
+    `/api/agent/sessions/${encodeURIComponent(sessionId)}`,
+  ),
+  sendAgentMessage: (sessionId: string, content: string, idempotencyKey: string) =>
+    request<AgentSession>(
+      `/api/agent/sessions/${encodeURIComponent(sessionId)}/messages`, {
+        method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey },
+        body: JSON.stringify({ content }),
+      },
+    ),
+  resumeAgentSession: (
+    sessionId: string, approved: boolean, idempotencyKey: string,
+  ) => request<AgentSession>(
+    `/api/agent/sessions/${encodeURIComponent(sessionId)}/resume`, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({ approved }),
+    },
+  ),
   customers: () => request<Customer[]>("/api/catalog/customers"),
   products: () => request<Product[]>("/api/catalog/products"),
   createProduct: (product: Omit<Product, "id">) => request<CatalogPublishResult>(

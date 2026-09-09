@@ -13,6 +13,14 @@ class CatalogSearchInput(BaseModel):
     active_only: bool = True
 
 
+def _matches_query(query: str, candidate: str) -> bool:
+    normalized_candidate = candidate.strip().lower()
+    return bool(
+        normalized_candidate
+        and (query in normalized_candidate or normalized_candidate in query)
+    )
+
+
 
 def register_catalog_tools(
     registry: ToolRegistry, gateway: HarnessBusinessGateway
@@ -24,9 +32,9 @@ def register_catalog_tools(
             if (not args.active_only or product["active"])
             and (
                 not normalized
-                or normalized in product["name"].lower()
-                or normalized in product["sku"].lower()
-                or any(normalized in alias.lower() for alias in product["aliases"])
+                or _matches_query(normalized, product["name"])
+                or _matches_query(normalized, product["sku"])
+                or any(_matches_query(normalized, alias) for alias in product["aliases"])
             )
         ][:20]
 

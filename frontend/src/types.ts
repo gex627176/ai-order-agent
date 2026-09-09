@@ -1,4 +1,23 @@
 export type Customer = { id: number; name: string; contact: string };
+export type AgentSessionStatus =
+  | "active" | "waiting_input" | "waiting_approval" | "completed" | "failed";
+export type AgentPendingAction = {
+  name: "provide_customer" | "review_sku" | "confirm_order";
+  arguments: Record<string, unknown>;
+  permission: "read" | "draft_write" | "transaction_write";
+};
+export type AgentEvent = {
+  id: number; sequence: number; type: string; actor: string; name: string;
+  status: string; summary: string; payload: Record<string, unknown>; created_at: string;
+};
+export type AgentSession = {
+  id: string; status: AgentSessionStatus; site_id: number; customer_id: number | null;
+  current_draft_id: string | null; current_order_id: number | null;
+  pending_action: AgentPendingAction | null; context_summary: string;
+  summary_through_sequence: number; last_message: string; version: number;
+  last_event_sequence: number; has_more_events: boolean;
+  created_at: string; updated_at: string; events: AgentEvent[];
+};
 export type Product = {
   id: number; sku: string; name: string; aliases: string[];
   unit: string; unit_price: number; active: boolean;

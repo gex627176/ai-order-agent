@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import CatalogPanel from "./CatalogPanel";
 import { api } from "./api";
-import type { Draft, Order, Product, RecognitionTask } from "./types";
+import type { AgentSession, Draft, Order, Product, RecognitionTask } from "./types";
 
 vi.mock("./api", () => {
   class ApiRequestError extends Error {
@@ -23,6 +23,8 @@ vi.mock("./api", () => {
     createFileRecognitionTask: vi.fn(), retryRecognitionTask: vi.fn(),
     cancelRecognitionTask: vi.fn(), recognize: vi.fn(), confirm: vi.fn(),
     subscribeRecognitionTask: vi.fn(),
+    createAgentSession: vi.fn(), agentSession: vi.fn(),
+    sendAgentMessage: vi.fn(), resumeAgentSession: vi.fn(),
     },
   };
 });
@@ -74,6 +76,17 @@ function makeTask(
   };
 }
 
+function makeAgentSession(): AgentSession {
+  return {
+    id: "agent-session", status: "active", site_id: 1, customer_id: 1,
+    current_draft_id: null, current_order_id: null, pending_action: null,
+    context_summary: "", summary_through_sequence: 0, last_message: "会话已创建",
+    version: 1, last_event_sequence: 1, has_more_events: false,
+    created_at: "2026-09-09T08:00:00Z", updated_at: "2026-09-09T08:00:00Z",
+    events: [],
+  };
+}
+
 function setDefaultApiMocks() {
   mockedApi.customers.mockResolvedValue([{ id: 1, name: "张三", contact: "13800000000" }]);
   mockedApi.products.mockResolvedValue([product]);
@@ -102,6 +115,7 @@ function setDefaultApiMocks() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
   setDefaultApiMocks();
 });
 
@@ -111,6 +125,65 @@ afterEach(() => {
 });
 
 describe("前端韧性与人工审核", () => {
+  it("模型 P95 使用易读单位并提示小样本语义", async () => {
+    mockedApi.metricsOverview.mockResolvedValue({
+      total_calls: 19, success_count: 18, fallback_count: 1, failure_count: 0,
+      success_rate: 94.74, fallback_rate: 5.26, average_duration_ms: 5149.37,
+      p95_duration_ms: 20875, prompt_tokens: 4202, completion_tokens: 4852,
+      total_tokens: 9054, estimated_cost: 0,
+    });
+
+    render(<App />);
+
+    const metric = (await screen.findByText("P95 时延")).closest("article");
+    expect(metric?.textContent).toContain("20.9 s");
+    expect(metric?.textContent).toContain("19 次样本 · 小样本 P95 等于最慢值");
+  });
+
+  it.each([
+    [0, 0, "0 ms", "暂无历史样本"],
+    [20, 9999, "9,999 ms", "20 次历史样本"],
+    [20, 10000, "10.0 s", "20 次历史样本"],
+  ])("模型 P95 正确处理 %i 次样本和 %i 毫秒边界", async (
+    totalCalls, durationMs, displayed, context,
+  ) => {
+    mockedApi.metricsOverview.mockResolvedValue({
+      total_calls: totalCalls, success_count: totalCalls, fallback_count: 0,
+      failure_count: 0, success_rate: totalCalls ? 100 : 0, fallback_rate: 0,
+      average_duration_ms: durationMs, p95_duration_ms: durationMs,
+      prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, estimated_cost: 0,
+    });
+
+    render(<App />);
+
+    const metric = (await screen.findByText("P95 时延")).closest("article");
+    expect(metric?.textContent).toContain(displayed);
+    expect(metric?.textContent).toContain(context);
+  });
+
+  it("可以切换到独立 Agent 对话工作区", async () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Agent 对话/ }));
+
+    expect(await screen.findByRole("button", { name: "创建 Agent 会话" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "开始智能识别 →" })).toBeNull();
+  });
+
+  it("切换录单模式不会卸载正在使用的 Agent 会话", async () => {
+    mockedApi.createAgentSession.mockResolvedValue(makeAgentSession());
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Agent 对话/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "创建 Agent 会话" }));
+    await screen.findByText("会话已创建");
+
+    fireEvent.click(screen.getByRole("button", { name: /标准录单/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Agent 对话/ }));
+
+    expect(screen.getByText("会话已创建")).toBeTruthy();
+    expect(mockedApi.createAgentSession).toHaveBeenCalledTimes(1);
+  });
+
   it("非核心指标失败时仍加载客户和录单入口", async () => {
     mockedApi.metricsOverview.mockRejectedValue(new Error("metrics offline"));
     mockedApi.modelMetrics.mockRejectedValue(new Error("metrics offline"));
